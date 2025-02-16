@@ -1,0 +1,12 @@
+{
+    "cnn_dailymail": {
+        "LoRA": {"lr": null},
+        "WeightLoRA": {"lr": null},
+        "FatLoRA": {"lr": null}
+    },
+    "xsum": {
+        "LoRA": {"lr": null},
+        "WeightLoRA": {"lr": null},
+        "FatLoRA": {"lr": null}
+    }
+}
