@@ -526,6 +526,7 @@ class WeightAdamW(optim.Optimizer):
         betas: tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-6,
         weight_decay: float = 0.0,
+        fat_step: int = 1,
         correct_bias: bool = True,
         no_deprecation_warning: bool = True,
     ):
@@ -547,6 +548,7 @@ class WeightAdamW(optim.Optimizer):
             raise ValueError(f"Invalid epsilon value: {eps} - should be >= 0.0")
         defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias}
         super().__init__(params, defaults)
+        self.fat_step = fat_step
 
     @torch.no_grad()
     def step(self, closure: Callable = None):
@@ -560,7 +562,7 @@ class WeightAdamW(optim.Optimizer):
         if closure is not None:
             loss = closure()
 
-        for i, group in enumerate(self.param_groups):
+        for group in self.param_groups:
             if group["name"] != "weight_params":
             ############################ Adam Step #############################
                 for p in group["params"]:
@@ -604,13 +606,16 @@ class WeightAdamW(optim.Optimizer):
                 for p in group["params"]:
                     if p.grad is None:
                         continue
+                    state = self.state[p]
+                    if len(state) == 0:
+                        state["step"] = 0
+                    state["step"] += 1
                     p.add_(p.grad, alpha=-group['lr'])
                     w_grad.append(p.grad.item())
                     w_vector.append(p.data.item())
                 j = 0
-                # print(w_vector)
                 w_grad = torch.tensor(w_grad)
-                if torch.linalg.norm(w_grad).item() > 1e-10:
+                if state["step"] % self.fat_step == 0 and torch.linalg.norm(w_grad).item() > 1e-10:
                     w_vector = torch.tensor(w_vector)
                     w_vector = group["proj"](w_vector, group["k"])
                     for p in group["params"]:

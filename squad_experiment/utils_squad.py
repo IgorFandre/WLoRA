@@ -477,15 +477,18 @@ def squad_preprocess(data_args, training_args, model_args):
 
     test_dataset, test_examples = None, None
     if training_args.do_predict:
-        if "test" not in raw_datasets:
+        if "test" in raw_datasets:
+            test_examples = raw_datasets["test"]
+        elif "validation" in raw_datasets:
+            test_examples = raw_datasets["validation"]
+        else:
             raise ValueError("--do_predict requires a test dataset")
-        test_examples = raw_datasets["test"]
-        if data_args.max_predict_samples is not None:
+        if data_args.max_test_samples is not None:
             # We will select sample from whole data
-            predict_examples = predict_examples.select(range(data_args.max_predict_samples))
+            test_examples = test_examples.select(range(data_args.max_test_samples))
         # Predict Feature Creation
         with training_args.main_process_first(desc="prediction dataset map pre-processing"):
-            test_dataset = predict_examples.map(
+            test_dataset = test_examples.map(
                 prepare_validation_features,
                 batched=True,
                 num_proc=data_args.preprocessing_num_workers,
@@ -493,10 +496,10 @@ def squad_preprocess(data_args, training_args, model_args):
                 load_from_cache_file=not data_args.overwrite_cache,
                 desc="Running tokenizer on prediction dataset",
             )
-        if data_args.max_predict_samples is not None:
+        if data_args.max_test_samples is not None:
             # During Feature creation dataset samples might increase, we will select required samples again
-            max_predict_samples = min(len(predict_dataset), data_args.max_predict_samples)
-            predict_dataset = predict_dataset.select(range(max_predict_samples))
+            max_test_samples = min(len(test_dataset), data_args.max_test_samples)
+            test_dataset = test_dataset.select(range(max_test_samples))
 
     # Data collator
     # We have already padded to max length if the corresponding flag is True, otherwise we need to pad in the data

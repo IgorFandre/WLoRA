@@ -1,6 +1,7 @@
 import random, torch, peft
 import torch.nn as nn
 import numpy as np
+from typing import Callable
 
 def print_trainable_parameters(model, verbose=True):
     """
@@ -143,20 +144,46 @@ def get_peft_arguments(training_args):
 
 class AdapterLayer(nn.Module):
     """Wraps a linear layer with LoRA-like adapter. Wraps an existing OPT linear layer"""
-    def __init__(self, module: nn.Linear, r: int = 8):
+    def __init__(self, module: nn.Linear, r: int = 8, add_weight=True):
         super().__init__()
         self.module = module  # pre-trained (frozen) linear layer
         self.lora_A = nn.Linear(in_features=module.in_features,
                                 out_features=r, bias=False,
                                 dtype=module.weight.dtype,
                                 device=module.weight.device)
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=5 ** 0.5)
         self.lora_B = nn.Linear(in_features=r,
                                 out_features=module.out_features, bias=False,
                                 dtype=module.weight.dtype,
                                 device=module.weight.device)
-        self.w = torch.tensor(1., requires_grad=True)
+        nn.init.zeros_(self.lora_B.weight)
+        self.add_weight = add_weight
+        if add_weight: self.w = torch.tensor(1., requires_grad=True)
 
     def forward(self, x):
         frwd_module = self.module(x)
-        frwd_adapter = self.w * self.lora_B(self.lora_A(x))
+        if self.add_weight:
+            frwd_adapter = self.w * self.lora_B(self.lora_A(x))
+        else:
+            frwd_adapter = self.lora_B(self.lora_A(x))
         return frwd_module + frwd_adapter
+    
+class IdOptimizer(torch.optim.Optimizer):
+    def __init__(self, params, lr=0.01):
+        defaults = dict(lr=lr)
+        super(IdOptimizer, self).__init__(params, defaults)
+        self.grad_0 = None
+
+    def step(self, closure: Callable = None):
+        loss = None
+        if closure is not None:
+            loss = closure()
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                if self.grad_0 is None:
+                    self.grad_0 = p.grad.data
+                else:
+                    self.grad_0 += p.grad.data
+        return loss

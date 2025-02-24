@@ -45,14 +45,12 @@ def main():
         if "attention.self" not in name and "output.dense" not in name and "intermediate.dence" not in name:
             param.requires_grad = False
     num_peft_adapters = utils.count_atapters(model, training_args.ft_strategy)
-    if training_args.use_rand and training_args.ft_strategy == "WeightLoRA":
-        training_args.ft_strategy = "RandLoRA"
-        utils.apply_rand_weight_lora(model, num_peft_adapters, training_args.k)
-    ft_strategy = training_args.ft_strategy
-    if ft_strategy == "WeightLoRA":
-        if training_args.use_fat: ft_strategy = "FatLoRA"
-        if training_args.use_rand: ft_strategy = "RandLoRA"
-    training_args.ft_strategy = ft_strategy
+    if training_args.ft_strategy == "WeightLoRA":
+        if training_args.use_rand: 
+            training_args.ft_strategy = "RandLoRA"
+            utils.apply_rand_weight_lora(model, num_peft_adapters, training_args.k)
+        if training_args.use_fat:
+            training_args.ft_strategy = "FatLoRA"
     ######################### Optimizer and Scheduler ##########################
     optimizer, scheduler = None, None
     if "tuned" in [training_args.learning_rate]: # [TODO] add more tuned params
@@ -67,15 +65,17 @@ def main():
     if training_args.ft_strategy == "FatLoRA":
         weight_params, loraAB_params, other_params = [], [], []
         for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
             if "weight_lora_w" in name:
                 weight_params.append(param)
             elif "weight_lora_A" in name or "weight_lora_B" in name:
                 loraAB_params.append(param)
         optimizer = optimizers.FatAdamW(
-            [{"params" : weight_params, "proj" : optimizers.proj_0,
-              "lr" : training_args.learning_rate_w, "name" : "weight_params"},
-             {"params" : loraAB_params, "name" : "loraAB"},
-             {"params" : other_params,  "name" : "other_params"},], 
+            [{"params" : loraAB_params, "name" : "loraAB"},
+             {"params" : other_params,  "name" : "other_params"},
+             {"params" : weight_params, "proj" : optimizers.proj_0,
+              "lr" : training_args.learning_rate_w, "name" : "weight_params"}], 
             lr=training_args.learning_rate,
             weight_decay=training_args.weight_decay,
             num_adapters=len(weight_params),
@@ -86,6 +86,8 @@ def main():
     elif training_args.ft_strategy == "WeightLoRA":
         weight_params, other_params = [], []
         for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
             if "weight_lora_w" in name:
                 weight_params.append(param)
             elif "weight_lora_A" in name or "weight_lora_B" in name:
@@ -96,20 +98,13 @@ def main():
               "lr" : training_args.learning_rate_w, "name" : "weight_params"}], 
             lr=training_args.learning_rate,
             weight_decay=training_args.weight_decay,
+            fat_step=training_args.fat_step,
         )
     else:
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=training_args.learning_rate,
             weight_decay=training_args.weight_decay
-        )
-    
-    if optimizer is not None:
-        scheduler = get_scheduler(
-            name=training_args.lr_scheduler_type, 
-            optimizer=optimizer,
-            num_warmup_steps=training_args.warmup_steps,
-            num_training_steps=training_args.max_steps
         )
     ############################### Wandb Saves ################################
     training_args.all_params, training_args.trainable_params = \
@@ -123,18 +118,15 @@ def main():
         run_name = f"[{training_args.ft_strategy} k={training_args.k} r={training_args.lora_r}]"
     else:
         run_name = f"[{training_args.ft_strategy} r={training_args.lora_r}]"
-    run_name += f" {data_args.dataset_name}"
+    run_name += f" {data_args.dataset_name} lr={training_args.learning_rate}"
     training_args.run_name = run_name
     training_args.output_dir = f"./squad_experiment/{training_args.output_dir}/{run_name}"
-    os.environ["WANDB_TAGS"] = f"FINAL {data_args.dataset_name}"
+    os.environ["WANDB_TAGS"] = f"{data_args.dataset_name} NEW"
     if optimizer is not None:
         training_args.optimizer = optimizer.__class__.__name__
-        training_args.scheduler = scheduler.__class__.__name__
     else:
         training_args.optimizer = training_args.optim
-        training_args.scheduler = training_args.lr_scheduler_type
     training_args.benchmark_name = data_args.dataset_name
-    training_args.tsk_name = data_args.task_name
     ############################# Training #####################################
     print("$"*30, f" {run_name} ", "$"*30)
     trainer = QuestionAnsweringTrainer(
@@ -163,11 +155,17 @@ def main():
             i = 0
             for name, param in model.named_parameters():
                 if "weight_lora_w" in name:
-                    if param.sum().item() > 0:
+                    if param.sum().item() > 0 and param.requires_grad:
                         i += 1
                         if training_args.model_name == "microsoft/deberta-v3-base":
                             tmp = name.split(".")
-                            load_name = f"{tmp[8].split('_')[0]}#{tmp[5]}"
+                            if "attention.self" in name:
+                                layer_name = f"attn_{tmp[8].split('_')[0]}" 
+                            elif "attention" in name:
+                                layer_name = f"attn_{tmp[7]}"
+                            else:
+                                layer_name = tmp[6]
+                            load_name = f"{layer_name}#{tmp[5]}"
                         else:
                             load_name = name
                         train_metrics[f"active_adapters_{i}"] = load_name
@@ -181,9 +179,8 @@ def main():
         if "wandb" in training_args.report_to:
             wandb.config.update(train_metrics, allow_val_change=True)
     ################################ Evaluation ################################
-    if training_args.do_evaluate:
-        #eval_metrics = trainer.evaluate()
-        eval_metrics = {}
+    if training_args.do_eval:
+        eval_metrics = trainer.evaluate()
 
         max_val_samples = data_args.max_val_samples if data_args.max_val_samples is not None else len(eval_dataset)
         eval_metrics["eval_samples"] = min(max_val_samples, len(eval_dataset))
@@ -196,6 +193,20 @@ def main():
             eval_metrics["eval_runtime"] /= 60
         if "wandb" in training_args.report_to:
             wandb.config.update(eval_metrics, allow_val_change=True)
+    ################################# Testing ##################################
+    if training_args.do_predict:
+        results = trainer.predict(test_dataset, test_examples)
+        metrics = results.metrics
+
+        max_test_samples = (
+            data_args.max_test_samples if data_args.max_test_samples is not None else len(test_dataset)
+        )
+        metrics["test_samples"] = min(max_test_samples, len(test_dataset))
+
+        trainer.log_metrics("predict", metrics)
+        trainer.save_metrics("predict", metrics)
+        if "wandb" in training_args.report_to:
+            wandb.config.update(metrics, allow_val_change=True)
     ############################################################################
 
     del trainer, model

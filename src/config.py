@@ -170,6 +170,12 @@ class DataTrainingArguments:
             "help": "Whether to ignore the tokens corresponding to padded labels in the loss computation or not."
         },
     )
+    num_beams: Optional[int] = field(
+        default=True,
+        metadata={
+            "help": "[TODO]"
+        },
+    )
 
     def __post_init__(self):
         if self.dataset_name == "glue":
@@ -230,7 +236,7 @@ class ModelArguments:
     model_name_or_path: str = field(
         default=None,
         metadata={
-            "help": "Path to pretrained model or model identifier from huggingface.co/models. Possible choises are: microsoft/deberta-v3-base, meta-llama/Llama-2-7b-hf, mistralai/Mistral-7B-Instruct-v0.3, microsoft/deberta-v3-base"
+            "help": "Path to pretrained model or model identifier from huggingface.co/models. Possible choises are: microsoft/deberta-v3-base, meta-llama/Meta-Llama-3.1-8B, mistralai/Mistral-7B-Instruct-v0.3, microsoft/deberta-v3-base"
         }
     )
     config_name: Optional[str] = field(
@@ -280,10 +286,6 @@ class TrainingArguments(Seq2SeqTrainingArguments):
         default=True,
         metadata={"help": "Do training or not"}
     )
-    do_evaluate: Optional[bool] = field(
-        default=True,
-        metadata={"help": "Do evaluating or not"}
-    )
     dataset_text_field: Optional[str] = field(
         default="text",
         metadata={"help": "Default text key in train dataset"}
@@ -316,37 +318,13 @@ class TrainingArguments(Seq2SeqTrainingArguments):
         default=1,
         metadata={"help": "How often print train loss"}
     )
-    load_best_model_at_end: Optional[bool] = field(
-        default=True,
-        metadata={"help": "Load best model at the end of training or not"}
-    )
     seed: Optional[int] = field(
         default=18,
         metadata={"help": "Seed for all experiment"}
     )
-    save_strategy: Optional[str] = field(
-        default="steps",
-        metadata={"help": "How to save your model"}
-    )
     learning_rate: Optional[str] = field(
         default="8e-4",
         metadata={"help": "Learning rate. If `tuned`, then uses tuded hyperparametars, if float number it would be cast to float"}
-    )
-    warmup_steps: Optional[int] = field(
-        default=100,
-        metadata={"help": "Warmup steps"}
-    )
-    max_steps: Optional[int] = field(
-        default=512,
-        metadata={"help": "Max steps of optimizer. Overrides num_train_epochs"}
-    )
-    eval_steps: Optional[int] = field(
-        default=4,
-        metadata={"help": "How often make eval"}
-    )
-    save_steps: Optional[int] = field(
-        default=256,
-        metadata={"help": "How often save model"}
     )
     report_to: Optional[str] = field(
         default="wandb",

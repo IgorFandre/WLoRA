@@ -93,14 +93,6 @@ def main():
             lr=training_args.learning_rate,
             weight_decay=training_args.weight_decay
         )
-    
-    if optimizer is not None:
-        scheduler = get_scheduler(
-            name=training_args.lr_scheduler_type, 
-            optimizer=optimizer,
-            num_warmup_steps=training_args.warmup_steps,
-            num_training_steps=training_args.max_steps
-        )
     ############################### Wandb Saves ################################
     training_args.all_params, training_args.trainable_params = \
         utils.print_trainable_parameters(model)
@@ -116,13 +108,11 @@ def main():
     run_name += f" lr={training_args.learning_rate} {data_args.dataset_name}"
     training_args.run_name = run_name
     training_args.output_dir = f"./nlg_experiment/{training_args.output_dir}/{run_name}"
-    os.environ["WANDB_TAGS"] = f"{data_args.dataset_name}"
+    os.environ["WANDB_TAGS"] = f"NEW {data_args.dataset_name}"
     if optimizer is not None:
         training_args.optimizer = optimizer.__class__.__name__
-        training_args.scheduler = scheduler.__class__.__name__
     else:
         training_args.optimizer = training_args.optim
-        training_args.scheduler = training_args.lr_scheduler_type
     training_args.benchmark_name = data_args.dataset_name
     training_args.tsk_name = data_args.task_name
     ############################# Training #####################################
@@ -135,6 +125,7 @@ def main():
         tokenizer=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics if training_args.predict_with_generate else None,
+        optimizers=[optimizer, scheduler]
     )
 
     if training_args.do_train:
@@ -150,11 +141,10 @@ def main():
             i = 0
             for name, param in model.named_parameters():
                 if "weight_lora_w" in name:
-                    if param.sum().item() > 0:
+                    if param.sum().item() > 0 and param.requires_grad:
                         i += 1
                         if training_args.model_name == "microsoft/deberta-v3-base":
-                            tmp = name.split(".")
-                            load_name = f"{tmp[8].split('_')[0]}#{tmp[5]}"
+                            continue
                         else:
                             load_name = name
                         train_metrics[f"active_adapters_{i}"] = load_name
@@ -168,7 +158,7 @@ def main():
         if "wandb" in training_args.report_to:
             wandb.config.update(train_metrics, allow_val_change=True)
     ################################ Evaluation ################################
-    if training_args.do_evaluate:
+    if training_args.do_eval:
         max_length = (
             training_args.generation_max_length
             if training_args.generation_max_length is not None
@@ -176,8 +166,8 @@ def main():
         )
         num_beams = data_args.num_beams if data_args.num_beams is not None else training_args.generation_num_beams
         eval_metrics = trainer.evaluate(max_length=max_length, num_beams=num_beams, metric_key_prefix="eval")
-        max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
-        eval_metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
+        max_val_samples = data_args.max_val_samples if data_args.max_val_samples is not None else len(eval_dataset)
+        eval_metrics["eval_samples"] = min(max_val_samples, len(eval_dataset))
 
         trainer.log_metrics("eval", eval_metrics)
         trainer.save_metrics("eval", eval_metrics)
