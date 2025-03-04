@@ -7,7 +7,7 @@ do
     do
         for seed in 18
         do
-            CUDA_VISIBLE_DEVICES=5 python ./glue_experiment/run_glue.py \
+            CUDA_VISIBLE_DEVICES=4 python ./glue_experiment/run_glue.py \
                 --dataset_name glue \
                 --task_name mrpc \
                 --model_name_or_path microsoft/deberta-v3-base \
@@ -25,11 +25,11 @@ do
                 --lora_alpha 32 \
                 --lora_dropout 0.05 \
                 --k 20 \
-                --fat_step 1 \
+                --fat_step 0 \
                 --seed $seed \
                 --do_eval true \
                 --do_predict false \
-                --report_to wandb # none or wandb
+                --report_to none # none or wandb
         done
     done
 done

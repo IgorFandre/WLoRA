@@ -20,8 +20,8 @@ def main():
     for i in range(torch.cuda.device_count()):
         print("We will use the GPU:", torch.cuda.get_device_name(i))
     parser = HfArgumentParser((
-        config.ModelArguments, 
-        config.DataTrainingArguments, 
+        config.ModelArguments,
+        config.DataTrainingArguments,
         config.TrainingArguments
     ))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
@@ -44,15 +44,10 @@ def main():
         if "attention.self" not in name and "output.dense" not in name and "intermediate.dence" not in name:
             param.requires_grad = False
     num_peft_adapters = utils.count_atapters(model, training_args.ft_strategy)
-    if training_args.ft_strategy == "WeightLoRA":
-        if training_args.use_rand: 
-            training_args.ft_strategy = "RandLoRA"
-            utils.apply_rand_weight_lora(model, num_peft_adapters, training_args.k)
-        if training_args.use_fat:
-            training_args.ft_strategy = "FatLoRA"
+
+    #training_args.ft_strategy = "FatLoRA"
     training_args.label_names = ["labels"] # peft and compute_metrics() problem
     ######################### Optimizer and Scheduler ##########################
-    optimizer, scheduler = None, None
     if "tuned" in [training_args.learning_rate]: # [TODO] add more tuned params
         f_name = "./glue_experiment/tuned_params.json"
         with open(f_name) as f:
@@ -61,50 +56,14 @@ def main():
         training_args.learning_rate = lr
     else:
         training_args.learning_rate = float(training_args.learning_rate)
-    if training_args.ft_strategy == "FatLoRA":
-        weight_params, loraAB_params, other_params = [], [], []
-        for name, param in model.named_parameters():
-            if not param.requires_grad:
-                continue
-            if "weight_lora_w" in name:
-                weight_params.append(param)
-            elif "weight_lora_A" in name or "weight_lora_B" in name:
-                loraAB_params.append(param)
-        optimizer = optimizers.FatAdamW(
-            [{"params" : loraAB_params, "name" : "loraAB"},
-             {"params" : other_params,  "name" : "other_params"},
-             {"params" : weight_params, "proj" : optimizers.proj_0,
-              "lr" : training_args.learning_rate_w, "name" : "weight_params"}], 
-            lr=training_args.learning_rate,
-            weight_decay=training_args.weight_decay,
-            num_adapters=len(weight_params),
-            fat_step=training_args.fat_step,
-            max_fat_steps=training_args.max_fat_steps,
-            lora_extention=training_args.lora_extention,
-        )
-    elif training_args.ft_strategy == "WeightLoRA":
-        weight_params, other_params = [], []
-        for name, param in model.named_parameters():
-            if not param.requires_grad:
-                continue
-            if "weight_lora_w" in name:
-                weight_params.append(param)
-            elif "weight_lora_A" in name or "weight_lora_B" in name:
-                other_params.append(param)
-        optimizer = optimizers.WeightAdamW(
-            [{"params" : other_params, "name" : "other_params"},
-             {"params" : weight_params, "k" : training_args.k, "proj" : optimizers.proj_0,
-              "lr" : training_args.learning_rate_w, "name" : "weight_params"}], 
-            lr=training_args.learning_rate,
-            weight_decay=training_args.weight_decay,
-            fat_step=training_args.fat_step,
-        )
-    else:
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=training_args.learning_rate,
-            weight_decay=training_args.weight_decay
-        )
+
+    # Set optimizer
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=training_args.learning_rate,
+        weight_decay=training_args.weight_decay
+    )
+
     ############################### Wandb Saves ################################
     training_args.all_params, training_args.trainable_params = \
         utils.print_trainable_parameters(model)
@@ -112,7 +71,7 @@ def main():
     training_args.peft_params = training_args.all_params - all_params_before_peft
     training_args.train_proportion = training_args.trainable_params / training_args.all_params * 100 
     training_args.peft_proportion = training_args.peft_params / training_args.all_params * 100 
-    os.environ["WANDB_PROJECT"] = "SBER_LORA"
+    os.environ["WANDB_PROJECT"] = "SIMPLEX_WLORA"
     if training_args.ft_strategy in ["WeightLoRA", "RandLoRA"]:
         run_name = f"[{training_args.ft_strategy} k={training_args.k} r={training_args.lora_r}]"
     else:
@@ -129,6 +88,9 @@ def main():
     training_args.tsk_name = data_args.task_name
     ############################# Training #####################################
     print("$"*30, f" {run_name} ", "$"*30)
+
+    ############## FAT STEP ##############
+    training_args.max_steps = 10
     trainer=Trainer(
         model=model,
         args=training_args,
@@ -137,7 +99,99 @@ def main():
         compute_metrics=compute_metrics,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        optimizers=[optimizer, scheduler]
+        optimizers=[optimizer, None] #
+    )
+    _ = trainer.train()
+    
+    w = []
+    for name, param in model.named_parameters():
+        if 'weight_lora_w' in name:
+            w.append(param.data.item())
+
+    w = np.array(w)
+    w = w - w.max()
+    soft_w = np.exp(w)/sum(np.exp(w))
+    
+    lora_dict = dict()
+    w_idx = 0
+    for name, param in model.named_parameters():
+        if 'weight_lora_A' in name: # Встречается первым в перечислении параметров
+            '''
+            # Сохраняем для префикса вес
+            pref_idx = text.find('weight_lora_A')
+            pref_text = name[0:pref_idx] if pref_idx != -1 else name
+            lora_dict[pref_text] = [soft_w[w_idx], None, None] # [w_new, r_new, R from QR(A)]
+            w_idx += 1
+
+            # Обновляем матрицу A
+            import math
+            r_old = param.data.shape[1]
+            r_new = int(math.floor(num_peft_adapters * soft_w[w_idx] * r_old))
+            lora_dict[pref_text][1] = r_new
+            if r_new > r_old:
+                Q, lora_dict[pref_text][2] = torch.linalg.qr(p.data, mode="reduced")
+                N = torch.rand_like(p.data, requires_grad=True)
+                I = torch.eye(np.max(p.data.shape), 
+                    requires_grad=True,
+                    device=p.data.device
+                )
+                p.data = torch.concat([Q, (I - Q@Q.T)@N], dim=1) * soft_w[w_idx]
+            elif r_new < r_old:
+                if r_new == 0:
+                    -------------
+                p.data = p.data * w_i # пока так, нужно написать уменьшение размерности, как в теории
+                pass
+            else: # r_new == r_old
+                p.data = p.data * w_i
+            '''
+            lora_dict[name] = param
+
+        if 'weight_lora_B' in name:
+            '''
+            pref_idx = text.find('weight_lora_A')
+            pref_text = name[0:pref_idx] if pref_idx != -1 else name
+
+            # Обновляем матрицу B
+            r_old = param.data.shape[0]
+            r_new = lora_dict[pref_text][1]
+            if r_new > r_old:
+                p.data = torch.concat([lora_dict[pref_text][2] @ p.data, O], dim=0)
+            elif r_new < r_old:
+                # пока так, нужно написать уменьшение размерности, как в теории
+                pass
+            '''
+            lora_dict[name] = param
+            
+
+        if 'weight_lora_w' in name:
+            param.data = 1
+            param.requires_grad = False
+            i += 1
+            
+            # r_new = 0
+            
+            if r_new > r_old:
+                utils.upgrade_lora_AB(A, B, new_r)
+            elif r_new < r_old:
+                utils.downgrade_lora_AB(A, B, new_r)
+            else:
+                # --------- 
+            
+    
+    exit(1)
+    
+    #####################################
+
+    training_args.max_steps = -1 # Default value
+    trainer=Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset if training_args.do_train else None,
+        eval_dataset=eval_dataset if training_args.do_eval else None,
+        compute_metrics=compute_metrics,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        optimizers=[optimizer, None] #
     )
 
     if training_args.do_train:
