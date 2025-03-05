@@ -90,7 +90,7 @@ def main():
     print("$"*30, f" {run_name} ", "$"*30)
 
     ############## FAT STEP ##############
-    training_args.max_steps = 10
+    training_args.max_steps = 1 #must be 10
     trainer=Trainer(
         model=model,
         args=training_args,
@@ -108,9 +108,11 @@ def main():
         if 'weight_lora_w' in name:
             w.append(param.data.item())
 
-    w = np.array(w)
-    w = w - w.max()
-    soft_w = np.exp(w)/sum(np.exp(w))
+    w_0 = np.array(w)
+    w_0 = w_0 - w_0.max()
+    soft_w = np.exp(w_0)/sum(np.exp(w_0))
+    
+    #print(f"len(w) = {len(w_0)}\nw = {w}\nsoft_w = {soft_w}")
     
     lora_dict = dict()
     w_idx = 0
@@ -131,7 +133,7 @@ def main():
             if r_new > r_old:
                 Q, lora_dict[pref_text][2] = torch.linalg.qr(p.data, mode="reduced")
                 N = torch.rand_like(p.data, requires_grad=True)
-                I = torch.eye(np.max(p.data.shape), 
+                I = torch.eye(np.max(p.data.shape),
                     requires_grad=True,
                     device=p.data.device
                 )
@@ -161,23 +163,37 @@ def main():
                 pass
             '''
             lora_dict[name] = param
-            
 
         if 'weight_lora_w' in name:
-            param.data = 1
+            param.data = torch.tensor(1., device=param.device)
             param.requires_grad = False
-            i += 1
+
+            A_name = name.replace('weight_lora_w', 'weight_lora_A')
+            B_name = name.replace('weight_lora_w', 'weight_lora_B')
             
-            # r_new = 0
-            
-            if r_new > r_old:
-                utils.upgrade_lora_AB(A, B, new_r)
+            r_old = lora_dict[A_name].data.shape[1]
+            r_new = int(num_peft_adapters * soft_w[w_idx] * r_old)
+            #print(f"r_old = {r_old}\nnum_peft_adapters = {num_peft_adapters}\n")
+
+            if True: #r_new > r_old:
+                utils.upgrade_lora_AB(
+                    lora_dict[A_name], 
+                    lora_dict[B_name],
+                    r_old + 1
+                )
+                print(f"finish-2: {lora_dict[A_name].data.shape}, {lora_dict[A_name].data.shape}")
+            elif r_new == 0:
+                pass
             elif r_new < r_old:
-                utils.downgrade_lora_AB(A, B, new_r)
-            else:
-                # --------- 
+                utils.downgrade_lora_AB(
+                    lora_dict[A_name], 
+                    lora_dict[B_name], 
+                    r_new
+                )
+                
             
-    
+            lora_dict[A_name] = lora_dict[A_name] * w[w_idx]
+
     exit(1)
     
     #####################################
