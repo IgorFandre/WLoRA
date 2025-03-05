@@ -169,21 +169,32 @@ class AdapterLayer(nn.Module):
         return frwd_module + frwd_adapter
 
 def upgrade_lora_AB(A, B, r_new):
-    print(f"start: {A.data.shape}, {B.data.shape}")
     Q, R = torch.linalg.qr(A.data, mode="reduced")
     N = torch.rand((A.data.shape[0], r_new - A.data.shape[1]), requires_grad=True, device=A.data.device)
-    I = torch.eye(np.max(A.data.shape),
-        requires_grad=True,
-        device=A.data.device
-    )
-    A.data = torch.concat([Q, (I - Q@Q.T)@N], dim=1)
+    I = torch.eye(np.max(A.data.shape), requires_grad=True, device=A.data.device)
     O = torch.zeros((r_new - B.data.shape[0], B.data.shape[1]), requires_grad=True, device=B.data.device)
-    B.data = torch.concat([R @ B.data, O], dim=0)
-    print(f"finish: {A.data.shape}, {B.data.shape}")
 
-def downgrade_lora_AB(A, B, new_r):
-    pass
-    
+    A.data = torch.concat([Q, (I - Q@Q.T)@N], dim=1)
+    B.data = torch.concat([R @ B.data, O], dim=0)
+
+def downgrade_lora_AB(A, B, r_new):
+    Q_A, R_A = torch.linalg.qr(A.data, mode="reduced")
+    Q_B, R_B = torch.linalg.qr(B.data.T, mode="reduced")
+    U, S, V = torch.linalg.svd(R_A @ R_B.T)
+
+    dim_S = max(U.shape[1], V.shape[0])
+    if len(S) < dim_S:
+        S = torch.diag(torch.concat((S, torch.zeros(dim_S-len(S), device=S.device))))[:U.shape[1], :V.shape[0]]
+    else:
+        S = torch.diag(S)
+
+    U_r = U[:, :r_new]
+    S_r = S[:r_new, :r_new]
+    V_r = V[:r_new, :]
+
+    A.data = Q_A @ U_r
+    B.data = S_r @ V_r @ Q_B.T
+
 class IdOptimizer(torch.optim.Optimizer):
     def __init__(self, params, lr=0.01):
         defaults = dict(lr=lr)

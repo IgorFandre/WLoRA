@@ -90,7 +90,8 @@ def main():
     print("$"*30, f" {run_name} ", "$"*30)
 
     ############## FAT STEP ##############
-    training_args.max_steps = 1 #must be 10
+    training_args.max_steps = 10
+    
     trainer=Trainer(
         model=model,
         args=training_args,
@@ -100,7 +101,7 @@ def main():
         tokenizer=tokenizer,
         data_collator=data_collator,
         optimizers=[optimizer, None] #
-    )
+    ) #### WARNING с обычным адамом маленький lr, и w не успевают обучиться
     _ = trainer.train()
     
     w = []
@@ -112,89 +113,53 @@ def main():
     w_0 = w_0 - w_0.max()
     soft_w = np.exp(w_0)/sum(np.exp(w_0))
     
-    #print(f"len(w) = {len(w_0)}\nw = {w}\nsoft_w = {soft_w}")
-    
     lora_dict = dict()
     w_idx = 0
     for name, param in model.named_parameters():
-        if 'weight_lora_A' in name: # Встречается первым в перечислении параметров
-            '''
-            # Сохраняем для префикса вес
-            pref_idx = text.find('weight_lora_A')
-            pref_text = name[0:pref_idx] if pref_idx != -1 else name
-            lora_dict[pref_text] = [soft_w[w_idx], None, None] # [w_new, r_new, R from QR(A)]
-            w_idx += 1
-
-            # Обновляем матрицу A
-            import math
-            r_old = param.data.shape[1]
-            r_new = int(math.floor(num_peft_adapters * soft_w[w_idx] * r_old))
-            lora_dict[pref_text][1] = r_new
-            if r_new > r_old:
-                Q, lora_dict[pref_text][2] = torch.linalg.qr(p.data, mode="reduced")
-                N = torch.rand_like(p.data, requires_grad=True)
-                I = torch.eye(np.max(p.data.shape),
-                    requires_grad=True,
-                    device=p.data.device
-                )
-                p.data = torch.concat([Q, (I - Q@Q.T)@N], dim=1) * soft_w[w_idx]
-            elif r_new < r_old:
-                if r_new == 0:
-                    -------------
-                p.data = p.data * w_i # пока так, нужно написать уменьшение размерности, как в теории
-                pass
-            else: # r_new == r_old
-                p.data = p.data * w_i
-            '''
+        if 'weight_lora_A' in name:
             lora_dict[name] = param
 
         if 'weight_lora_B' in name:
-            '''
-            pref_idx = text.find('weight_lora_A')
-            pref_text = name[0:pref_idx] if pref_idx != -1 else name
-
-            # Обновляем матрицу B
-            r_old = param.data.shape[0]
-            r_new = lora_dict[pref_text][1]
-            if r_new > r_old:
-                p.data = torch.concat([lora_dict[pref_text][2] @ p.data, O], dim=0)
-            elif r_new < r_old:
-                # пока так, нужно написать уменьшение размерности, как в теории
-                pass
-            '''
             lora_dict[name] = param
 
-        if 'weight_lora_w' in name:
-            param.data = torch.tensor(1., device=param.device)
-            param.requires_grad = False
+        if 'weight_lora_w' in name: # Встречается последним в перечислении параметров
+            param.data = torch.tensor(1., device=param.device, requires_grad=False)
 
             A_name = name.replace('weight_lora_w', 'weight_lora_A')
             B_name = name.replace('weight_lora_w', 'weight_lora_B')
             
-            r_old = lora_dict[A_name].data.shape[1]
-            r_new = int(num_peft_adapters * soft_w[w_idx] * r_old)
-            #print(f"r_old = {r_old}\nnum_peft_adapters = {num_peft_adapters}\n")
-
-            if True: #r_new > r_old:
-                utils.upgrade_lora_AB(
-                    lora_dict[A_name], 
-                    lora_dict[B_name],
-                    r_old + 1
-                )
-                print(f"finish-2: {lora_dict[A_name].data.shape}, {lora_dict[A_name].data.shape}")
-            elif r_new == 0:
-                pass
-            elif r_new < r_old:
-                utils.downgrade_lora_AB(
-                    lora_dict[A_name], 
-                    lora_dict[B_name], 
-                    r_new
-                )
-                
+            A = lora_dict[A_name]
+            B = lora_dict[B_name]
             
-            lora_dict[A_name] = lora_dict[A_name] * w[w_idx]
+            r_old = A.data.shape[1]
+            r_new = int(num_peft_adapters * soft_w[w_idx] * r_old)
 
-    exit(1)
+            print(f'{r_old}, {r_new}')
+            if r_new > r_old:
+                utils.upgrade_lora_AB(A, B, r_new)
+                break
+            elif r_new == 0:
+                A.data = torch.zeros((A.data.shape[0], 1), requires_grad=False, device=A.data.device)
+                B.data = torch.zeros((1, B.data.shape[1]), requires_grad=False, device=B.data.device)
+                break
+            elif r_new < r_old:
+                print(f'begin: A = {A.shape}, B = {B.shape}')
+                utils.downgrade_lora_AB(A, B, r_new)
+                print(f'end: A = {A.shape}, B = {B.shape}')
+                break
+            
+            torch.cuda.empty_cache()
+
+            A.data = A.data * w[w_idx]
+            
+            # In previous verion:
+            # state["step"] = 0
+            # state["exp_avg"] = torch.zeros_like(p)
+            # state["exp_avg_sq"] = torch.zeros_like(p) 
+            # The problem:
+            ### RuntimeError: The size of tensor a (4) must match the size of tensor b (3) at non-singleton dimension 1
+            ### begin: A = torch.Size([768, 4]), B = torch.Size([4, 768])
+            ### end: A = torch.Size([768, 3]), B = torch.Size([3, 768])
     
     #####################################
 
@@ -207,7 +172,7 @@ def main():
         compute_metrics=compute_metrics,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        optimizers=[optimizer, None] #
+        optimizers=[optimizer, None]
     )
 
     if training_args.do_train:
